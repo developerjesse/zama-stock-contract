@@ -4,6 +4,7 @@ pragma solidity ^0.8.27;
 import {FhevmTest} from "forge-fhevm/FhevmTest.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {externalEuint64, euint64} from "encrypted-types/EncryptedTypes.sol";
+import {ERC7984} from "@openzeppelin/confidential-contracts/token/ERC7984/ERC7984.sol";
 import {ConfidentialStock} from "../src/ConfidentialStock.sol";
 
 contract ConfidentialStockTest is FhevmTest {
@@ -391,5 +392,39 @@ contract ConfidentialStockTest is FhevmTest {
         assertEq(_balanceOf(registrar, alice.addr), 60e6);
         assertEq(_balanceOf(registrar, bob.addr), 40e6);
         assertEq(_decryptHandle(registrar, euint64.unwrap(moved)), 40e6);
+    }
+
+    // --- force transfer must not be usable as a mint/burn backdoor ---
+
+    function test_forceTransferRejectsZeroEndpoints_proofOverload() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 100e6);
+
+        (externalEuint64 enc, bytes memory proof) = encryptUint64(40e6, issuer, stockAddress);
+        vm.startPrank(issuer);
+        // zero `from` would mint to an arbitrary recipient without touching rawTotalSupply
+        vm.expectRevert(abi.encodeWithSelector(ERC7984.ERC7984InvalidSender.selector, address(0)));
+        stock.forceConfidentialTransferFrom(address(0), bob.addr, enc, proof);
+        // zero `to` would burn
+        (enc, proof) = encryptUint64(40e6, issuer, stockAddress);
+        vm.expectRevert(abi.encodeWithSelector(ERC7984.ERC7984InvalidReceiver.selector, address(0)));
+        stock.forceConfidentialTransferFrom(alice.addr, address(0), enc, proof);
+        vm.stopPrank();
+    }
+
+    function test_forceTransferRejectsZeroEndpoints_handleOverload() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 100e6);
+
+        // A forced transfer leaves the agent with ACL on `moved`, which the handle overload requires.
+        (externalEuint64 enc, bytes memory proof) = encryptUint64(10e6, issuer, stockAddress);
+        vm.startPrank(issuer);
+        euint64 moved = stock.forceConfidentialTransferFrom(alice.addr, bob.addr, enc, proof);
+
+        vm.expectRevert(abi.encodeWithSelector(ERC7984.ERC7984InvalidSender.selector, address(0)));
+        stock.forceConfidentialTransferFrom(address(0), bob.addr, moved);
+        vm.expectRevert(abi.encodeWithSelector(ERC7984.ERC7984InvalidReceiver.selector, address(0)));
+        stock.forceConfidentialTransferFrom(alice.addr, address(0), moved);
+        vm.stopPrank();
     }
 }

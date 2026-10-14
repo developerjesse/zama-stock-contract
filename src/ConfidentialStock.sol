@@ -122,6 +122,11 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     /// @dev ERC7984Rwa's force path calls `super._update` from inside Rwa, which resolves PAST our `_update` override,
     ///      so it needs its own hook or force transfers (lost keys, lawful orders) would skip the registrar grants.
     function _forceUpdate(address from, address to, euint64 amount) internal override returns (euint64 transferred) {
+        // The force path skips `_transfer`'s address checks, and a zero endpoint is interpreted by `_update` as a
+        // mint (from) or burn (to). Reject both so force transfer cannot bypass treasury-only issuance or desync
+        // `rawTotalSupply`.
+        require(from != address(0), ERC7984InvalidSender(address(0)));
+        require(to != address(0), ERC7984InvalidReceiver(address(0)));
         transferred = super._forceUpdate(from, to, amount);
         _grantRegistrar(from, to, transferred);
     }
