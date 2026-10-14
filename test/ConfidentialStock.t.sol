@@ -14,6 +14,8 @@ contract ConfidentialStockTest is FhevmTest {
     Account treasury;
     Account alice;
     Account bob;
+    Account registrar;
+    Account regulator;
 
     uint64 constant SUPPLY = 1_000_000e6;
 
@@ -24,6 +26,8 @@ contract ConfidentialStockTest is FhevmTest {
         stockAddress = address(stock);
         alice = makeAccount("alice");
         bob = makeAccount("bob");
+        registrar = makeAccount("registrar");
+        regulator = makeAccount("regulator");
     }
 
     // --- helpers ---
@@ -37,6 +41,27 @@ contract ConfidentialStockTest is FhevmTest {
         (externalEuint64 enc, bytes memory proof) = encryptUint64(amount, treasury.addr, stockAddress);
         vm.prank(treasury.addr);
         stock.confidentialTransfer(to, enc, proof);
+    }
+
+    /// @dev External wrapper so `vm.expectRevert` can catch the internal decrypt helper's revert.
+    function decryptExt(Account memory who, bytes32 handle) external returns (uint256) {
+        return userDecrypt(handle, who.addr, stockAddress, signUserDecrypt(who.key, stockAddress));
+    }
+
+    function _assertCannotDecrypt(Account memory who, bytes32 handle) internal {
+        // Flush recorded logs into the plaintext DB first: the reverted call below would otherwise swallow them.
+        _processNewLogs();
+        vm.expectRevert();
+        this.decryptExt(who, handle);
+    }
+
+    function _handleOf(address holder) internal view returns (bytes32) {
+        return euint64.unwrap(stock.confidentialBalanceOf(holder));
+    }
+
+    function _setRegistrar() internal {
+        vm.prank(issuer);
+        stock.setRegistrar(registrar.addr);
     }
 
     /// @dev Client-side display math: raw * multiplier / 1e18, rounded down.
@@ -257,5 +282,114 @@ contract ConfidentialStockTest is FhevmTest {
         uint256 raw = (1_000_000 * 1e18) / stock.multiplier(); // 333_333
         assertEq(raw, 333_333);
         assertEq(_displayed(raw), 999_999);
+    }
+
+    // --- 3. holder isolation ---
+
+    function test_holdersCannotDecryptEachOther() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 600e6);
+        _transferFromTreasury(bob.addr, 400e6);
+
+        assertEq(_balanceOf(alice, alice.addr), 600e6);
+        assertEq(_balanceOf(bob, bob.addr), 400e6);
+        _assertCannotDecrypt(alice, _handleOf(bob.addr));
+        _assertCannotDecrypt(bob, _handleOf(alice.addr));
+    }
+
+    // --- 4. registrar standing access ---
+
+    function test_registrarDecryptsBalancesAndTransferAmounts() public {
+        _setRegistrar();
+        _mintToTreasury();
+
+        (externalEuint64 enc, bytes memory proof) = encryptUint64(600e6, treasury.addr, stockAddress);
+        vm.prank(treasury.addr);
+        euint64 sent = stock.confidentialTransfer(alice.addr, enc, proof);
+        _transferFromTreasury(bob.addr, 400e6);
+
+        assertEq(_balanceOf(registrar, alice.addr), 600e6);
+        assertEq(_balanceOf(registrar, bob.addr), 400e6);
+        assertEq(_balanceOf(registrar, treasury.addr), SUPPLY - 1000e6);
+        assertEq(_decryptHandle(registrar, euint64.unwrap(sent)), 600e6);
+    }
+
+    function _decryptHandle(Account memory who, bytes32 handle) internal returns (uint256) {
+        return userDecrypt(handle, who.addr, stockAddress, signUserDecrypt(who.key, stockAddress));
+    }
+
+    function test_onlyAdminSetsRegistrar() public {
+        bytes32 role = stock.DEFAULT_ADMIN_ROLE();
+        vm.prank(alice.addr);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice.addr, role)
+        );
+        stock.setRegistrar(alice.addr);
+    }
+
+    // --- 5. regulator on-request disclosure ---
+
+    function test_discloseGivesRegulatorAccessToOneHolderOnly() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 600e6);
+        _transferFromTreasury(bob.addr, 400e6);
+
+        _assertCannotDecrypt(regulator, _handleOf(alice.addr));
+
+        vm.expectEmit(address(stock));
+        emit ConfidentialStock.Disclosed(alice.addr, regulator.addr, _handleOf(alice.addr));
+        vm.prank(issuer);
+        stock.disclose(alice.addr, regulator.addr);
+
+        assertEq(_balanceOf(regulator, alice.addr), 600e6);
+        _assertCannotDecrypt(regulator, _handleOf(bob.addr));
+    }
+
+    function test_nonAgentCannotDisclose() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 600e6);
+
+        bytes32 role = stock.AGENT_ROLE();
+        vm.prank(alice.addr);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice.addr, role)
+        );
+        stock.disclose(alice.addr, regulator.addr);
+    }
+
+    function test_discloseRevertsForHolderWithNoBalance() public {
+        vm.prank(issuer);
+        vm.expectRevert(abi.encodeWithSelector(ConfidentialStock.NothingToDisclose.selector, bob.addr));
+        stock.disclose(bob.addr, regulator.addr);
+    }
+
+    function test_disclosureIsASnapshot() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 600e6);
+
+        vm.prank(issuer);
+        stock.disclose(alice.addr, regulator.addr);
+        assertEq(_balanceOf(regulator, alice.addr), 600e6);
+
+        // Alice receives more: new balance handle, regulator has no access to it.
+        _transferFromTreasury(alice.addr, 100e6);
+        assertEq(_balanceOf(alice, alice.addr), 700e6);
+        _assertCannotDecrypt(regulator, _handleOf(alice.addr));
+    }
+
+    // --- Rwa force transfer composes with registrar access ---
+
+    function test_forceTransferStillGrantsRegistrar() public {
+        _setRegistrar();
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 100e6);
+
+        (externalEuint64 enc, bytes memory proof) = encryptUint64(40e6, issuer, stockAddress);
+        vm.prank(issuer);
+        euint64 moved = stock.forceConfidentialTransferFrom(alice.addr, bob.addr, enc, proof);
+
+        assertEq(_balanceOf(registrar, alice.addr), 60e6);
+        assertEq(_balanceOf(registrar, bob.addr), 40e6);
+        assertEq(_decryptHandle(registrar, euint64.unwrap(moved)), 40e6);
     }
 }

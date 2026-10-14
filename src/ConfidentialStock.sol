@@ -19,7 +19,12 @@ import {ERC7984Rwa} from "@openzeppelin/confidential-contracts/token/ERC7984/ext
 contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     error MintBurnDisabled();
     error InvalidCorporateAction();
+    error NothingToDisclose(address holder);
 
+    event RegistrarSet(address indexed registrar);
+    /// @dev Public audit trail of regulator disclosures. It also signals that a regulator is looking at `holder`.
+    ///      TODO(open design question): keep the event, or move the audit trail off-chain.
+    event Disclosed(address indexed holder, address indexed regulator, bytes32 balanceHandle);
     event CorporateAction(string kind, uint256 numerator, uint256 denominator, uint256 newMultiplier);
 
     uint256 internal constant MULTIPLIER_ONE = 1e18;
@@ -33,6 +38,11 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     /// @notice Plaintext raw share supply (before multiplier). Primary issuance matches custodian shares, which are
     ///         public anyway.
     uint64 public rawTotalSupply;
+
+    /// @notice Issuer customer-service address with standing ACL access to every balance and transfer handle.
+    /// @dev Changing the registrar only affects FUTURE handles: the previous registrar keeps access to handles it was
+    ///      already granted (ACL grants are not revocable).
+    address public registrar;
 
     constructor(
         string memory name_,
@@ -51,6 +61,26 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     function mint(uint64 rawAmount) external onlyAgent {
         rawTotalSupply += rawAmount;
         _mint(treasury, FHE.asEuint64(rawAmount));
+    }
+
+    /// @notice Sets the registrar that gets standing access to all future balance and transfer handles.
+    function setRegistrar(address newRegistrar) external onlyAdmin {
+        registrar = newRegistrar;
+        emit RegistrarSet(newRegistrar);
+    }
+
+    /// @notice On-request regulator disclosure: lets `regulator` decrypt `holder`'s CURRENT balance.
+    /// @dev Snapshot semantics: the grant is on the current balance handle only. Every balance change creates a new
+    ///      handle, so future balances need another `disclose` call. Historical transfer amounts are shared off-chain
+    ///      by the registrar (who holds ACL on all of them), which is out of scope for the contract.
+    ///      The token holds `allowThis` on every balance handle (ERC7984 `_update`), so it can `allow` it onward.
+    ///      TODO(may revisit): `disclose` lets any agent expose any holder's balance to any address. A compromised
+    ///      agent key could disclose every balance. Consider a separate role or a holder-consent flow.
+    function disclose(address holder, address regulator) external onlyAgent {
+        euint64 bal = confidentialBalanceOf(holder);
+        require(FHE.isInitialized(bal), NothingToDisclose(holder));
+        FHE.allow(bal, regulator);
+        emit Disclosed(holder, regulator, euint64.unwrap(bal));
     }
 
     /// @notice Applies a rebase-style corporate action: `multiplier = multiplier * numerator / denominator`.
@@ -72,6 +102,28 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     /// @notice Total supply as published to CMC/CG: `rawTotalSupply * multiplier / 1e18` (rounds down).
     function publishedSupply() external view returns (uint256) {
         return (uint256(rawTotalSupply) * multiplier) / MULTIPLIER_ONE;
+    }
+
+    /// @dev Composes with ERC7984Rwa via `super`. Grants use the handle `super` RETURNS (Rwa may reduce the amount,
+    ///      e.g. frozen balances) and the balances AFTER the update.
+    function _update(address from, address to, euint64 amount) internal override returns (euint64 transferred) {
+        transferred = super._update(from, to, amount);
+        _grantRegistrar(from, to, transferred);
+    }
+
+    function _grantRegistrar(address from, address to, euint64 transferred) internal {
+        address reg = registrar;
+        if (reg == address(0)) return;
+        FHE.allow(transferred, reg);
+        if (from != address(0)) FHE.allow(confidentialBalanceOf(from), reg);
+        if (to != address(0)) FHE.allow(confidentialBalanceOf(to), reg);
+    }
+
+    /// @dev ERC7984Rwa's force path calls `super._update` from inside Rwa, which resolves PAST our `_update` override,
+    ///      so it needs its own hook or force transfers (lost keys, lawful orders) would skip the registrar grants.
+    function _forceUpdate(address from, address to, euint64 amount) internal override returns (euint64 transferred) {
+        transferred = super._forceUpdate(from, to, amount);
+        _grantRegistrar(from, to, transferred);
     }
 
     // --- Rwa mint/burn are disabled ---
