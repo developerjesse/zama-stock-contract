@@ -13,8 +13,14 @@ import {ERC7984Rwa} from "@openzeppelin/confidential-contracts/token/ERC7984/ext
 ///      The issuer is the Rwa AGENT (`AGENT_ROLE`); the admin (`DEFAULT_ADMIN_ROLE`) manages agents.
 /// @dev Encrypted balances hold RAW shares (6 decimals). The displayed balance is
 ///      `decrypt(raw) * multiplier / 1e18`, computed client-side only. The contract never multiplies encrypted values.
+/// @dev Fractional shares: 1 share = 1e6 raw units. Raw precision is fixed, so the smallest unit a holder can transact
+///      is `multiplier * 1e-6` shares (exactly 1e-6 only while multiplier == 1.0; coarser after splits, finer after
+///      reverse splits). Display amounts round down.
 contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     error MintBurnDisabled();
+    error InvalidCorporateAction();
+
+    event CorporateAction(string kind, uint256 numerator, uint256 denominator, uint256 newMultiplier);
 
     uint256 internal constant MULTIPLIER_ONE = 1e18;
 
@@ -45,6 +51,22 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     function mint(uint64 rawAmount) external onlyAgent {
         rawTotalSupply += rawAmount;
         _mint(treasury, FHE.asEuint64(rawAmount));
+    }
+
+    /// @notice Applies a rebase-style corporate action: `multiplier = multiplier * numerator / denominator`.
+    ///         2-for-1 split: (2, 1). Reinvested $0.50 dividend on a $100 share: (1005, 1000).
+    /// @dev Zero FHE operations: encrypted raw balances never change, only the public multiplier does.
+    ///      Rounding: the new multiplier rounds DOWN (1e18 precision, so at most 1e-18 relative error). Displayed
+    ///      balances also round down client-side. A multiplier of 0 is rejected, and the upper bound keeps
+    ///      `rawTotalSupply * multiplier` inside uint256 so `publishedSupply()` can never overflow.
+    ///      NOTE: one multiplier means one uniform rate for all holders, so e.g. dividend withholding cannot differ
+    ///      per holder.
+    function applyCorporateAction(uint256 numerator, uint256 denominator, string calldata kind) external onlyAgent {
+        require(numerator != 0 && denominator != 0, InvalidCorporateAction());
+        uint256 newMultiplier = (multiplier * numerator) / denominator;
+        require(newMultiplier != 0 && newMultiplier <= type(uint192).max, InvalidCorporateAction());
+        multiplier = newMultiplier;
+        emit CorporateAction(kind, numerator, denominator, newMultiplier);
     }
 
     /// @notice Total supply as published to CMC/CG: `rawTotalSupply * multiplier / 1e18` (rounds down).
