@@ -8,15 +8,12 @@ import {ERC7984} from "@openzeppelin/confidential-contracts/token/ERC7984/ERC798
 import {ERC7984Rwa} from "@openzeppelin/confidential-contracts/token/ERC7984/extensions/ERC7984Rwa.sol";
 
 /// @title ConfidentialStock
-/// @notice A confidential tokenized stock. Balances and transfers are encrypted (ERC7984); issuance is plaintext
-///         and always lands in the issuer treasury, so individual allocations stay private.
-/// @dev Built on ERC7984Rwa, which brings AccessControl, pause, freeze, block/allow lists and agent force-transfer.
-///      The issuer is the Rwa AGENT (`AGENT_ROLE`); the admin (`DEFAULT_ADMIN_ROLE`) manages agents.
-/// @dev Encrypted balances hold RAW shares (6 decimals). The displayed balance is
-///      `decrypt(raw) * multiplier / 1e18`, computed client-side only. The contract never multiplies encrypted values.
-/// @dev Fractional shares: 1 share = 1e6 raw units. Raw precision is fixed, so the smallest unit a holder can transact
-///      is `multiplier * 1e-6` shares (exactly 1e-6 only while multiplier == 1.0; coarser after splits, finer after
-///      reverse splits). Display amounts round down.
+/// @notice A confidential tokenized stock where balances are encrypted (ERC7984). The issuance is in plaintext
+///         and are minted to the treasury address. Individual allocations always stay private.
+/// @dev Encrypted balances hold RAW shares to 6 decimals. Any display change takes the raw amount and 
+///      multiplies it against the `multiplier` which represents splits, or dividends
+/// @dev Fractional shares: the underlining issuer, needs to accept and handle fractional shares for the
+///      for the balances to work. Display amounts always round down, which is a percision issue.
 contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     error MintBurnDisabled();
     error InvalidCorporateAction();
@@ -24,26 +21,23 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     error NotRepresentable(uint256 shares, uint256 multiplier);
 
     event RegistrarSet(address indexed registrar);
-    /// @dev Public audit trail of regulator disclosures. It also signals that a regulator is looking at `holder`.
-    ///      TODO(open design question): keep the event, or move the audit trail off-chain.
+    /// @dev The fact that you call the `Disclosed(address)` already leaks that this has happened 
     event Disclosed(address indexed holder, address indexed regulator, bytes32 balanceHandle);
     event CorporateAction(string kind, uint256 numerator, uint256 denominator, uint256 newMultiplier);
 
+    /// @dev Starting multiplier is 1
     uint256 internal constant MULTIPLIER_ONE = 1e18;
 
-    /// @notice Issuer treasury. The only address that receives minted shares.
+    /// @notice Issuer treasury who receives minted shares.
     address public immutable treasury;
 
     /// @notice Fixed-point rebase multiplier, `1e18 = 1.0`.
     uint256 public multiplier = MULTIPLIER_ONE;
 
-    /// @notice Plaintext raw share supply (before multiplier). Primary issuance matches custodian shares, which are
-    ///         public anyway.
+    /// @notice Plaintext raw share supply (before multiplier) which is used to inform CMC/CG
     uint64 public rawTotalSupply;
 
-    /// @notice Issuer customer-service address with standing ACL access to every balance and transfer handle.
-    /// @dev Changing the registrar only affects FUTURE handles: the previous registrar keeps access to handles it was
-    ///      already granted (ACL grants are not revocable).
+    /// @dev the issuers internal auditor or customer-service address with ACL access to all balances and transfers
     address public registrar;
 
     constructor(
@@ -58,15 +52,16 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         _grantRole(AGENT_ROLE, admin);
     }
 
-    /// @notice Mints `rawAmount` raw shares to the treasury. Reverts if `rawTotalSupply` would overflow `uint64`.
-    /// @dev Distribution to holders is an ordinary confidential transfer from the treasury.
+    /// @notice The initial mint function, after a CorporateAction() is performed, one should use mintShares
+    ///.        below instead. 
+    /// @jesse  Does this need to be here? could we combine mint() and mintShares()?
     function mint(uint64 rawAmount) external onlyAgent {
         _mintRaw(rawAmount);
     }
 
-    /// @notice Mints `shares` real (display) micro-shares to the treasury, converting to raw at the current multiplier.
-    /// @dev Reverts with `NotRepresentable` unless `shares` converts to a whole number of raw units, rather than
-    ///      silently over- or under-issuing. The contract cannot verify that the custodian holds the underlying shares.
+    /// @notice Mint shares exists because after a CorporateAction is performed, you must calculate that
+    ///         modification when minting new shares.
+    /// @dev I had considered leaving this out, but it was an easy lift and is a question that may come up.
     function mintShares(uint256 shares) external onlyAgent {
         (uint256 raw, bool exact) = sharesToRaw(shares);
         require(exact, NotRepresentable(shares, multiplier));
@@ -74,13 +69,8 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         _mintRaw(uint64(raw));
     }
 
-    /// @notice Converts display micro-shares to raw units at the current multiplier: `shares * 1e18 / multiplier`.
-    /// @dev Rounds DOWN; `exact` is false when `raw` does not display as exactly `shares`.
-    ///      Recommended policy for TRANSFERS (done client-side, since transfer amounts are encrypted raw): use this
-    ///      floored `raw`. The sender never moves more than requested, so a send cannot overshoot the balance (an
-    ///      over-balance send silently moves 0). Cost: up to `multiplier / 1e18 - 1` micro-shares less than requested
-    ///      (3-for-1: 1.000000 requested, 0.999999 moved), and amounts under one raw unit's display value move nothing.
-    ///      Wallets should show `raw * multiplier / 1e18` before confirming. `mintShares` rejects inexact amounts instead.
+    /// @notice Takes the raw shares multipled by the `multiplier` returning a display value. It rounds down
+    ///         which may lead to inpercision at the dust level.
     function sharesToRaw(uint256 shares) public view returns (uint256 raw, bool exact) {
         uint256 m = multiplier;
         raw = Math.mulDiv(shares, MULTIPLIER_ONE, m);
@@ -98,13 +88,7 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         emit RegistrarSet(newRegistrar);
     }
 
-    /// @notice On-request regulator disclosure: lets `regulator` decrypt `holder`'s CURRENT balance.
-    /// @dev Snapshot semantics: the grant is on the current balance handle only. Every balance change creates a new
-    ///      handle, so future balances need another `disclose` call. Historical transfer amounts are shared off-chain
-    ///      by the registrar (who holds ACL on all of them), which is out of scope for the contract.
-    ///      The token holds `allowThis` on every balance handle (ERC7984 `_update`), so it can `allow` it onward.
-    ///      TODO(may revisit): `disclose` lets any agent expose any holder's balance to any address. A compromised
-    ///      agent key could disclose every balance. Consider a separate role or a holder-consent flow.
+    /// @notice Disclose a current balance handle to a regulator.
     function disclose(address holder, address regulator) external onlyAgent {
         euint64 bal = confidentialBalanceOf(holder);
         require(FHE.isInitialized(bal), NothingToDisclose(holder));
@@ -112,14 +96,9 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         emit Disclosed(holder, regulator, euint64.unwrap(bal));
     }
 
-    /// @notice Applies a rebase-style corporate action: `multiplier = multiplier * numerator / denominator`.
-    ///         2-for-1 split: (2, 1). Reinvested $0.50 dividend on a $100 share: (1005, 1000).
-    /// @dev Zero FHE operations: encrypted raw balances never change, only the public multiplier does.
-    ///      Rounding: the new multiplier rounds DOWN (1e18 precision, so at most 1e-18 relative error). Displayed
-    ///      balances also round down client-side. A multiplier of 0 is rejected, and the upper bound keeps
-    ///      `rawTotalSupply * multiplier` inside uint256 so `publishedSupply()` can never overflow.
-    ///      NOTE: one multiplier means one uniform rate for all holders, so e.g. dividend withholding cannot differ
-    ///      per holder.
+    /// @notice Applies a rebase-type action such as a split, or a reinvestment of a dividend.
+    /// @dev There are no FHE operations here because the encrypted raw balance does not need to change, rather 
+    ///      the public `multiplier` changes. And it rounds down, so we may loose a slight amount of percision.
     function applyCorporateAction(uint256 numerator, uint256 denominator, string calldata kind) external onlyAgent {
         require(numerator != 0 && denominator != 0, InvalidCorporateAction());
         uint256 newMultiplier = (multiplier * numerator) / denominator;
@@ -133,13 +112,14 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         return (uint256(rawTotalSupply) * multiplier) / MULTIPLIER_ONE;
     }
 
-    /// @dev Composes with ERC7984Rwa via `super`. Grants use the handle `super` RETURNS (Rwa may reduce the amount,
-    ///      e.g. frozen balances) and the balances AFTER the update.
+    /// @dev triggers after a mint() or transfer() and passes the amount and addresses involved. 
     function _update(address from, address to, euint64 amount) internal override returns (euint64 transferred) {
         transferred = super._update(from, to, amount);
         _grantRegistrar(from, to, transferred);
     }
 
+    /// @dev Grants access to the Registrar role to the balance handle at this point in time.
+    /// @dev is ignored if the registrar role is not set, or if burning (send to 0x0) and minting.
     function _grantRegistrar(address from, address to, euint64 transferred) internal {
         address reg = registrar;
         if (reg == address(0)) return;
@@ -148,8 +128,8 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         if (to != address(0)) FHE.allow(confidentialBalanceOf(to), reg);
     }
 
-    /// @dev ERC7984Rwa's force path calls `super._update` from inside Rwa, which resolves PAST our `_update` override,
-    ///      so it needs its own hook or force transfers (lost keys, lawful orders) would skip the registrar grants.
+    /// @dev This is out-of-the-box with ERC7984RWA, and can be triggered by lost keys or court orders. We need 
+    ///.     to override it here so we can call _grantRegistrar.
     function _forceUpdate(address from, address to, euint64 amount) internal override returns (euint64 transferred) {
         // The force path skips `_transfer`'s address checks, and a zero endpoint is interpreted by `_update` as a
         // mint (from) or burn (to). Reject both so force transfer cannot bypass treasury-only issuance or desync
@@ -161,10 +141,6 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     }
 
     // --- Rwa mint/burn are disabled ---
-    // ERC7984Rwa exposes agent `confidentialMint`/`confidentialBurn` for arbitrary addresses and encrypted amounts.
-    // Those would bypass the treasury-only rule and desync the plaintext `rawTotalSupply`, so issuance is only via
-    // `mint` above and there is no burn.
-
     function confidentialMint(address, externalEuint64, bytes calldata) public pure override returns (euint64) {
         revert MintBurnDisabled();
     }
@@ -173,6 +149,7 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         revert MintBurnDisabled();
     }
 
+    // Out of scope for the MVP:s
     function confidentialBurn(address, externalEuint64, bytes calldata) public pure override returns (euint64) {
         revert MintBurnDisabled();
     }
