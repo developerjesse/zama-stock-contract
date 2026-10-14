@@ -3,6 +3,7 @@ pragma solidity ^0.8.27;
 
 import {FHE, externalEuint64, euint64} from "@fhevm/solidity/lib/FHE.sol";
 import {ZamaEthereumConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ERC7984} from "@openzeppelin/confidential-contracts/token/ERC7984/ERC7984.sol";
 import {ERC7984Rwa} from "@openzeppelin/confidential-contracts/token/ERC7984/extensions/ERC7984Rwa.sol";
 
@@ -20,6 +21,7 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     error MintBurnDisabled();
     error InvalidCorporateAction();
     error NothingToDisclose(address holder);
+    error NotRepresentable(uint256 shares, uint256 multiplier);
 
     event RegistrarSet(address indexed registrar);
     /// @dev Public audit trail of regulator disclosures. It also signals that a regulator is looking at `holder`.
@@ -59,6 +61,33 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     /// @notice Mints `rawAmount` raw shares to the treasury. Reverts if `rawTotalSupply` would overflow `uint64`.
     /// @dev Distribution to holders is an ordinary confidential transfer from the treasury.
     function mint(uint64 rawAmount) external onlyAgent {
+        _mintRaw(rawAmount);
+    }
+
+    /// @notice Mints `shares` real (display) micro-shares to the treasury, converting to raw at the current multiplier.
+    /// @dev Reverts with `NotRepresentable` unless `shares` converts to a whole number of raw units, rather than
+    ///      silently over- or under-issuing. The contract cannot verify that the custodian holds the underlying shares.
+    function mintShares(uint256 shares) external onlyAgent {
+        (uint256 raw, bool exact) = sharesToRaw(shares);
+        require(exact, NotRepresentable(shares, multiplier));
+        require(raw <= type(uint64).max, NotRepresentable(shares, multiplier));
+        _mintRaw(uint64(raw));
+    }
+
+    /// @notice Converts display micro-shares to raw units at the current multiplier: `shares * 1e18 / multiplier`.
+    /// @dev Rounds DOWN; `exact` is false when `raw` does not display as exactly `shares`.
+    ///      Recommended policy for TRANSFERS (done client-side, since transfer amounts are encrypted raw): use this
+    ///      floored `raw`. The sender never moves more than requested, so a send cannot overshoot the balance (an
+    ///      over-balance send silently moves 0). Cost: up to `multiplier / 1e18 - 1` micro-shares less than requested
+    ///      (3-for-1: 1.000000 requested, 0.999999 moved), and amounts under one raw unit's display value move nothing.
+    ///      Wallets should show `raw * multiplier / 1e18` before confirming. `mintShares` rejects inexact amounts instead.
+    function sharesToRaw(uint256 shares) public view returns (uint256 raw, bool exact) {
+        uint256 m = multiplier;
+        raw = Math.mulDiv(shares, MULTIPLIER_ONE, m);
+        exact = Math.mulDiv(raw, m, MULTIPLIER_ONE) == shares;
+    }
+
+    function _mintRaw(uint64 rawAmount) internal {
         rawTotalSupply += rawAmount;
         _mint(treasury, FHE.asEuint64(rawAmount));
     }

@@ -427,4 +427,150 @@ contract ConfidentialStockTest is FhevmTest {
         stock.forceConfidentialTransferFrom(alice.addr, address(0), moved);
         vm.stopPrank();
     }
+
+    // --- corporate actions: raw units vs. shares ---
+
+    function _applyCorporateAction(uint256 numerator, uint256 denominator) internal {
+        vm.prank(issuer);
+        stock.applyCorporateAction(numerator, denominator, "action");
+    }
+
+    function _transferRaw(Account memory from, address to, uint64 rawAmount) internal {
+        (externalEuint64 enc, bytes memory proof) = encryptUint64(rawAmount, from.addr, stockAddress);
+        vm.prank(from.addr);
+        stock.confidentialTransfer(to, enc, proof);
+    }
+
+    function test_issuanceAfterSplit_mintSharesConvertsToRaw() public {
+        _mintToTreasury();
+        _applyCorporateAction(2, 1);
+        assertEq(stock.publishedSupply(), 2_000_000e6);
+
+        vm.prank(issuer);
+        stock.mintShares(100e6); // 100 real shares -> 50 raw
+
+        assertEq(stock.rawTotalSupply(), SUPPLY + 50e6);
+        assertEq(stock.publishedSupply(), 2_000_100e6);
+        assertEq(_balanceOf(treasury, treasury.addr), SUPPLY + 50e6);
+        assertEq(_displayed(50e6), 100e6);
+    }
+
+    function test_rawMintAfterSplit_overIssuesIfGivenShareCount() public {
+        _mintToTreasury();
+        _applyCorporateAction(2, 1);
+
+        // Documents the footgun `mintShares` exists for: `mint` is RAW, so passing 100 shares mints 200.
+        vm.prank(issuer);
+        stock.mint(100e6);
+        assertEq(stock.publishedSupply(), 2_000_200e6);
+    }
+
+    function test_issuanceAfterReinvestedDividend_exactConversion() public {
+        _mintToTreasury();
+        _applyCorporateAction(1005, 1000);
+        assertEq(stock.publishedSupply(), 1_005_000e6);
+
+        // The contract does not verify that the custodian actually holds the extra underlying shares.
+        vm.prank(issuer);
+        stock.mintShares(201e6); // 201e6 * 1e18 / 1.005e18 = 200e6 exactly
+
+        assertEq(stock.rawTotalSupply(), SUPPLY + 200e6);
+        assertEq(stock.publishedSupply(), 1_005_201e6);
+    }
+
+    function test_nonRepresentable_sharesToRawFloors() public {
+        _applyCorporateAction(3, 1);
+
+        (uint256 raw, bool exact) = stock.sharesToRaw(1e6);
+        assertEq(raw, 333_333);
+        assertFalse(exact);
+        // Neither neighbouring raw amount displays as exactly 1.000000 share.
+        assertEq(_displayed(333_333), 999_999);
+        assertEq(_displayed(333_334), 1_000_002);
+
+        (raw, exact) = stock.sharesToRaw(3e6);
+        assertEq(raw, 1e6);
+        assertTrue(exact);
+    }
+
+    function test_nonRepresentable_mintSharesReverts() public {
+        _applyCorporateAction(3, 1);
+
+        vm.startPrank(issuer);
+        vm.expectRevert(abi.encodeWithSelector(ConfidentialStock.NotRepresentable.selector, 1e6, 3e18));
+        stock.mintShares(1e6);
+
+        stock.mintShares(3e6); // representable: exactly 1e6 raw
+        vm.stopPrank();
+        assertEq(stock.rawTotalSupply(), 1e6);
+    }
+
+    function test_nonRepresentable_transferRoundsDown() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 100e6);
+        _applyCorporateAction(3, 1);
+
+        // Policy for transfers: convert shares -> raw with floor. Alice asks for 1.000000 share and moves 0.999999:
+        // never more than requested, so a send can't overshoot her balance (which would silently move nothing).
+        (uint256 raw,) = stock.sharesToRaw(1e6);
+        _transferRaw(alice, bob.addr, uint64(raw));
+        assertEq(_displayed(_balanceOf(bob, bob.addr)), 999_999);
+
+        // Amounts below one raw unit's display value (3 micro-shares here) floor to zero raw units.
+        (raw,) = stock.sharesToRaw(2);
+        assertEq(raw, 0);
+    }
+
+    function test_transferAfterSplit_usesRawUnits() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 100e6);
+        _applyCorporateAction(2, 1);
+        assertEq(_displayed(_balanceOf(alice, alice.addr)), 200e6);
+
+        // Alice wants to send 20 displayed shares. The transfer input is RAW, so that is 10 raw.
+        uint256 supplyBefore = stock.publishedSupply();
+        _transferRaw(alice, bob.addr, 10e6);
+
+        assertEq(_balanceOf(alice, alice.addr), 90e6);
+        assertEq(_displayed(_balanceOf(alice, alice.addr)), 180e6);
+        assertEq(_balanceOf(bob, bob.addr), 10e6);
+        assertEq(_displayed(_balanceOf(bob, bob.addr)), 20e6);
+        assertEq(stock.publishedSupply(), supplyBefore);
+    }
+
+    function test_supplyVsRoundedHolderBalances_discrepancy() public {
+        vm.prank(issuer);
+        stock.mint(200);
+        _transferFromTreasury(alice.addr, 199);
+        _transferFromTreasury(bob.addr, 1);
+        _applyCorporateAction(1005, 1000);
+
+        // Aggregate: 200 * 1.005 = 201.0 -> 201. Per holder: 199 * 1.005 = 199.995 -> 199, 1 * 1.005 = 1.005 -> 1.
+        uint256 aliceShown = _displayed(_balanceOf(alice, alice.addr));
+        uint256 bobShown = _displayed(_balanceOf(bob, bob.addr));
+        assertEq(stock.publishedSupply(), 201);
+        assertEq(aliceShown, 199);
+        assertEq(bobShown, 1);
+
+        // Expected one micro-unit gap: rounding each position down loses fractions the aggregate keeps.
+        assertEq(stock.publishedSupply() - (aliceShown + bobShown), 1);
+    }
+
+    function test_corporateActionPreservesEncryptedBalances() public {
+        _mintToTreasury();
+        _transferFromTreasury(alice.addr, 100e6);
+
+        bytes32 handleBefore = _handleOf(alice.addr);
+        uint256 rawBefore = _balanceOf(alice, alice.addr);
+        uint256 displayedBefore = _displayed(rawBefore);
+        uint256 supplyBefore = stock.publishedSupply();
+
+        _applyCorporateAction(2, 1);
+
+        // No FHE op ran: same handle, same raw plaintext. Only the public multiplier-derived values moved.
+        assertEq(_handleOf(alice.addr), handleBefore);
+        assertEq(_balanceOf(alice, alice.addr), rawBefore);
+        assertEq(_displayed(rawBefore), 2 * displayedBefore);
+        assertEq(stock.publishedSupply(), 2 * supplyBefore);
+    }
 }
