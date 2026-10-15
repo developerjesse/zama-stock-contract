@@ -45,10 +45,11 @@ registry, exchange integration, Safe/Fireblocks (possible stretch later).
 - `burn(uint64 rawAmount)` — from treasury only.
 
 ### Corporate actions (zero FHE ops)
-- `applyCorporateAction(uint256 numerator, uint256 denominator, string kind)`
-  - `multiplier = multiplier * numerator / denominator`
-  - 2-for-1 split: (2, 1). Reinvested dividend of $0.50 on $100: (1005, 1000).
-  - Emits `CorporateAction(kind, numerator, denominator, newMultiplier)`.
+- `setMultiplier(uint256 expectedOld, uint256 newMultiplier, string kind)`
+  - Absolute value computed off-chain (xStocks model). Reverts `MultiplierMismatch(expected, actual)` if `multiplier != expectedOld`.
+  - 2-for-1 split: 2e18. Reinvested dividend of $0.50 on $100: 1.005e18.
+  - A mistake is corrected by calling again with the wrong value as `expectedOld`.
+  - Emits `CorporateAction(kind, oldMultiplier, newMultiplier)`.
 - Note in comments: one multiplier = one uniform withholding rate for all holders.
 
 ### Register access (the FHE/ACL part)

@@ -184,9 +184,9 @@ contract ConfidentialStockTest is FhevmTest {
         _transferFromTreasury(bob.addr, 400e6);
 
         vm.expectEmit(address(stock));
-        emit ConfidentialStock.CorporateAction("split", 2, 1, 2e18);
+        emit ConfidentialStock.CorporateAction("split", 1e18, 2e18);
         vm.prank(issuer);
-        stock.applyCorporateAction(2, 1, "split");
+        stock.setMultiplier(1e18, 2e18, "split");
 
         assertEq(stock.multiplier(), 2e18);
 
@@ -208,7 +208,7 @@ contract ConfidentialStockTest is FhevmTest {
         _transferFromTreasury(bob.addr, 199); // 199 raw units: 199 * 1.005 = 199.995 -> 199
 
         vm.prank(issuer);
-        stock.applyCorporateAction(1005, 1000, "dividend");
+        stock.setMultiplier(1e18, 1.005e18, "dividend");
 
         assertEq(stock.multiplier(), 1.005e18);
         assertEq(_displayed(_balanceOf(alice, alice.addr)), 603e6);
@@ -216,44 +216,87 @@ contract ConfidentialStockTest is FhevmTest {
         assertEq(stock.publishedSupply(), 1_005_000e6);
     }
 
-    function test_actionsCompound() public {
-        vm.startPrank(issuer);
-        stock.applyCorporateAction(2, 1, "split");
-        stock.applyCorporateAction(1005, 1000, "dividend");
-        vm.stopPrank();
-        assertEq(stock.multiplier(), 2.01e18);
-    }
-
-    function test_multiplierRoundsDown() public {
+    function test_setMultiplier_updatesAndEmitsOldAndNew() public {
+        vm.expectEmit(address(stock));
+        emit ConfidentialStock.CorporateAction("dividend", 1e18, 1.005e18);
         vm.prank(issuer);
-        stock.applyCorporateAction(1, 3, "odd-ratio");
-        assertEq(stock.multiplier(), 333333333333333333);
+        stock.setMultiplier(1e18, 1.005e18, "dividend");
+        assertEq(stock.multiplier(), 1.005e18);
     }
 
-    // --- 8 (corporate action part) + input validation ---
+    function test_setMultiplier_mismatchReverts() public {
+        vm.startPrank(issuer);
+        vm.expectRevert(abi.encodeWithSelector(ConfidentialStock.MultiplierMismatch.selector, 2e18, 1e18));
+        stock.setMultiplier(2e18, 3e18, "split");
+        vm.stopPrank();
+        assertEq(stock.multiplier(), 1e18);
+    }
 
-    function test_nonAgentCannotApplyCorporateAction() public {
+    function test_nonAgentCannotSetMultiplier() public {
         bytes32 role = stock.AGENT_ROLE();
         vm.prank(alice.addr);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice.addr, role)
         );
-        stock.applyCorporateAction(2, 1, "split");
+        stock.setMultiplier(1e18, 2e18, "split");
     }
 
-    function test_corporateActionRejectsBadInputs() public {
+    function test_setMultiplier_rejectsBadValues() public {
         vm.startPrank(issuer);
         vm.expectRevert(ConfidentialStock.InvalidCorporateAction.selector);
-        stock.applyCorporateAction(0, 1, "x");
+        stock.setMultiplier(1e18, 0, "x");
         vm.expectRevert(ConfidentialStock.InvalidCorporateAction.selector);
-        stock.applyCorporateAction(1, 0, "x");
-        // rounds to a zero multiplier
-        vm.expectRevert(ConfidentialStock.InvalidCorporateAction.selector);
-        stock.applyCorporateAction(1, 2e18 + 1, "x");
-        // exceeds the uint192 upper bound
-        vm.expectRevert(ConfidentialStock.InvalidCorporateAction.selector);
-        stock.applyCorporateAction(type(uint192).max, 1, "x");
+        stock.setMultiplier(1e18, uint256(type(uint192).max) + 1, "x");
         vm.stopPrank();
+        assertEq(stock.multiplier(), 1e18);
+
+        // The upper bound itself is allowed.
+        vm.prank(issuer);
+        stock.setMultiplier(1e18, type(uint192).max, "max");
+        assertEq(stock.multiplier(), type(uint192).max);
+    }
+
+    function test_setMultiplier_correctionHasNoDrift() public {
+        _mintToTreasury();
+
+        // A wrong value goes out, then the agent corrects it from that same value.
+        vm.startPrank(issuer);
+        stock.setMultiplier(1e18, 1.0123456789e18, "dividend");
+        stock.setMultiplier(1.0123456789e18, 1.005e18, "dividend-correction");
+
+        // The stale old value can no longer be used.
+        vm.expectRevert(abi.encodeWithSelector(ConfidentialStock.MultiplierMismatch.selector, 1.0123456789e18, 1.005e18));
+        stock.setMultiplier(1.0123456789e18, 1.006e18, "dividend-correction");
+        vm.stopPrank();
+
+        assertEq(stock.multiplier(), 1.005e18);
+        assertEq(stock.publishedSupply(), (uint256(SUPPLY) * 1.005e18) / 1e18);
+        assertEq(stock.publishedSupply(), 1_005_000e6);
+    }
+
+    function test_setMultiplier_nvdaxHistoryReplay() public {
+        _mintToTreasury();
+
+        uint256[6] memory history = [
+            uint256(1e18),
+            1.00003086642674e18,
+            1.000065821833435198e18,
+            1.000103090792305e18,
+            1.0009180758490996e18,
+            1.001701196801074e18
+        ];
+
+        vm.startPrank(issuer);
+        for (uint256 i = 1; i < history.length; i++) {
+            vm.expectEmit(address(stock));
+            emit ConfidentialStock.CorporateAction("nvdax", history[i - 1], history[i]);
+            stock.setMultiplier(history[i - 1], history[i], "nvdax");
+            assertEq(stock.multiplier(), history[i]);
+        }
+        vm.stopPrank();
+
+        assertEq(stock.multiplier(), 1.001701196801074e18);
+        assertEq(stock.publishedSupply(), (uint256(stock.rawTotalSupply()) * 1.001701196801074e18) / 1e18);
     }
 
     // --- fractional shares (6 decimals) ---
@@ -263,18 +306,18 @@ contract ConfidentialStockTest is FhevmTest {
         _transferFromTreasury(alice.addr, 1_500_000); // 1.5 shares
 
         vm.prank(issuer);
-        stock.applyCorporateAction(1005, 1000, "dividend");
+        stock.setMultiplier(1e18, 1.005e18, "dividend");
 
         assertEq(_displayed(_balanceOf(alice, alice.addr)), 1_507_500); // 1.5075 shares
     }
 
-    /// @JESSE - YO!
+    // @JESSE - YO!
     function test_resolutionCoarsensAfterSplit() public {
         _mintToTreasury();
         _transferFromTreasury(alice.addr, 1_000_000); // 1.0 share
 
         vm.prank(issuer);
-        stock.applyCorporateAction(3, 1, "split");
+        stock.setMultiplier(1e18, 3e18, "split");
 
         // One raw unit now displays as 3 micro-shares.
         assertEq(_displayed(1), 3);
@@ -431,9 +474,10 @@ contract ConfidentialStockTest is FhevmTest {
 
     // --- corporate actions: raw units vs. shares ---
 
-    function _applyCorporateAction(uint256 numerator, uint256 denominator) internal {
+    function _setMultiplier(uint256 newMultiplier) internal {
+        uint256 current = stock.multiplier();
         vm.prank(issuer);
-        stock.applyCorporateAction(numerator, denominator, "action");
+        stock.setMultiplier(current, newMultiplier, "action");
     }
 
     function _transferRaw(Account memory from, address to, uint64 rawAmount) internal {
@@ -444,7 +488,7 @@ contract ConfidentialStockTest is FhevmTest {
 
     function test_issuanceAfterSplit_mintSharesConvertsToRaw() public {
         _mintToTreasury();
-        _applyCorporateAction(2, 1);
+        _setMultiplier(2e18);
         assertEq(stock.publishedSupply(), 2_000_000e6);
 
         vm.prank(issuer);
@@ -458,7 +502,7 @@ contract ConfidentialStockTest is FhevmTest {
 
     function test_rawMintAfterSplit_overIssuesIfGivenShareCount() public {
         _mintToTreasury();
-        _applyCorporateAction(2, 1);
+        _setMultiplier(2e18);
 
         // Documents the footgun `mintShares` exists for: `mint` is RAW, so passing 100 shares mints 200.
         vm.prank(issuer);
@@ -468,7 +512,7 @@ contract ConfidentialStockTest is FhevmTest {
 
     function test_issuanceAfterReinvestedDividend_exactConversion() public {
         _mintToTreasury();
-        _applyCorporateAction(1005, 1000);
+        _setMultiplier(1.005e18);
         assertEq(stock.publishedSupply(), 1_005_000e6);
 
         // The contract does not verify that the custodian actually holds the extra underlying shares.
@@ -480,7 +524,7 @@ contract ConfidentialStockTest is FhevmTest {
     }
 
     function test_nonRepresentable_sharesToRawFloors() public {
-        _applyCorporateAction(3, 1);
+        _setMultiplier(3e18);
 
         (uint256 raw, bool exact) = stock.sharesToRaw(1e6);
         assertEq(raw, 333_333);
@@ -495,7 +539,7 @@ contract ConfidentialStockTest is FhevmTest {
     }
 
     function test_nonRepresentable_mintSharesReverts() public {
-        _applyCorporateAction(3, 1);
+        _setMultiplier(3e18);
 
         vm.startPrank(issuer);
         vm.expectRevert(abi.encodeWithSelector(ConfidentialStock.NotRepresentable.selector, 1e6, 3e18));
@@ -509,7 +553,7 @@ contract ConfidentialStockTest is FhevmTest {
     function test_nonRepresentable_transferRoundsDown() public {
         _mintToTreasury();
         _transferFromTreasury(alice.addr, 100e6);
-        _applyCorporateAction(3, 1);
+        _setMultiplier(3e18);
 
         // Policy for transfers: convert shares -> raw with floor. Alice asks for 1.000000 share and moves 0.999999:
         // never more than requested, so a send can't overshoot her balance (which would silently move nothing).
@@ -525,7 +569,7 @@ contract ConfidentialStockTest is FhevmTest {
     function test_transferAfterSplit_usesRawUnits() public {
         _mintToTreasury();
         _transferFromTreasury(alice.addr, 100e6);
-        _applyCorporateAction(2, 1);
+        _setMultiplier(2e18);
         assertEq(_displayed(_balanceOf(alice, alice.addr)), 200e6);
 
         // Alice wants to send 20 displayed shares. The transfer input is RAW, so that is 10 raw.
@@ -544,7 +588,7 @@ contract ConfidentialStockTest is FhevmTest {
         stock.mint(200);
         _transferFromTreasury(alice.addr, 199);
         _transferFromTreasury(bob.addr, 1);
-        _applyCorporateAction(1005, 1000);
+        _setMultiplier(1.005e18);
 
         // Aggregate: 200 * 1.005 = 201.0 -> 201. Per holder: 199 * 1.005 = 199.995 -> 199, 1 * 1.005 = 1.005 -> 1.
         uint256 aliceShown = _displayed(_balanceOf(alice, alice.addr));
@@ -566,7 +610,7 @@ contract ConfidentialStockTest is FhevmTest {
         uint256 displayedBefore = _displayed(rawBefore);
         uint256 supplyBefore = stock.publishedSupply();
 
-        _applyCorporateAction(2, 1);
+        _setMultiplier(2e18);
 
         // No FHE op ran: same handle, same raw plaintext. Only the public multiplier-derived values moved.
         assertEq(_handleOf(alice.addr), handleBefore);

@@ -49,7 +49,7 @@ const STOCK = env("STOCK_ADDRESS") as Address;
 
 const ABI = parseAbi([
   "function mint(uint64 rawAmount)",
-  "function applyCorporateAction(uint256 numerator, uint256 denominator, string kind)",
+  "function setMultiplier(uint256 expectedOld, uint256 newMultiplier, string kind)",
   "function disclose(address holder, address regulator)",
   "function multiplier() view returns (uint256)",
   "function rawTotalSupply() view returns (uint64)",
@@ -142,15 +142,15 @@ function printState(s: Awaited<ReturnType<typeof readState>>) {
   );
 }
 
-async function applyAction(admin: Role, num: bigint, den: bigint, kind: string) {
+async function applyAction(admin: Role, expectedOld: bigint, newMultiplier: bigint, kind: string) {
   await send(
     admin,
-    `applyCorporateAction(${num}, ${den}, "${kind}")`,
+    `setMultiplier(${expectedOld}, ${newMultiplier}, "${kind}")`,
     admin.walletClient.writeContract({
       address: STOCK,
       abi: ABI,
-      functionName: "applyCorporateAction",
-      args: [num, den, kind],
+      functionName: "setMultiplier",
+      args: [expectedOld, newMultiplier, kind],
     }),
   );
 }
@@ -281,7 +281,7 @@ async function main() {
     if (steps.has("split")) {
       section("5. ADMIN applies a 2-for-1 split: zero FHE ops, encrypted balances untouched");
       const pre = await readState();
-      await applyAction(admin, 2n, 1n, "split");
+      await applyAction(admin, pre.multiplier, pre.multiplier * 2n, "split");
       const post = await readState();
       printState(post);
       check("multiplier doubled", post.multiplier === pre.multiplier * 2n);
@@ -293,7 +293,7 @@ async function main() {
     if (steps.has("dividend")) {
       section("6. ADMIN applies a reinvested dividend 1005/1000 ($0.50 on $100)");
       const pre = await readState();
-      await applyAction(admin, 1005n, 1000n, "dividend");
+      await applyAction(admin, pre.multiplier, (pre.multiplier * 1005n) / 1000n, "dividend");
       const post = await readState();
       printState(post);
       check("multiplier scaled by 1.005", post.multiplier === (pre.multiplier * 1005n) / 1000n);

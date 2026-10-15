@@ -17,13 +17,14 @@ import {ERC7984Rwa} from "@openzeppelin/confidential-contracts/token/ERC7984/ext
 contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
     error MintBurnDisabled();
     error InvalidCorporateAction();
+    error MultiplierMismatch(uint256 expected, uint256 actual);
     error NothingToDisclose(address holder);
     error NotRepresentable(uint256 shares, uint256 multiplier);
 
     event RegistrarSet(address indexed registrar);
     /// @dev The fact that you call the `Disclosed(address)` already leaks that this has happened 
     event Disclosed(address indexed holder, address indexed regulator, bytes32 balanceHandle);
-    event CorporateAction(string kind, uint256 numerator, uint256 denominator, uint256 newMultiplier);
+    event CorporateAction(string kind, uint256 oldMultiplier, uint256 newMultiplier);
 
     /// @dev Starting multiplier is 1
     uint256 internal constant MULTIPLIER_ONE = 1e18;
@@ -54,7 +55,7 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
 
     /// @notice The initial mint function, after a CorporateAction() is performed, one should use mintShares
     ///.        below instead. 
-    /// @jesse  Does this need to be here? could we combine mint() and mintShares()?
+    // @jesse  Does this need to be here? could we combine mint() and mintShares()?
     function mint(uint64 rawAmount) external onlyAgent {
         _mintRaw(rawAmount);
     }
@@ -96,15 +97,17 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         emit Disclosed(holder, regulator, euint64.unwrap(bal));
     }
 
-    /// @notice Applies a rebase-type action such as a split, or a reinvestment of a dividend.
-    /// @dev There are no FHE operations here because the encrypted raw balance does not need to change, rather 
-    ///      the public `multiplier` changes. And it rounds down, so we may loose a slight amount of percision.
-    function applyCorporateAction(uint256 numerator, uint256 denominator, string calldata kind) external onlyAgent {
-        require(numerator != 0 && denominator != 0, InvalidCorporateAction());
-        uint256 newMultiplier = (multiplier * numerator) / denominator;
+    /// @notice Sets the absolute multiplier for a rebase-type action such as a split, or a reinvestment of a dividend.
+    /// @dev The new value is computed off-chain, so rounding never compounds on-chain. `expectedOld` must match the
+    ///      current multiplier, which makes a correction a reissue from the same old value: if a wrong value was
+    ///      set, call again with the wrong value as `expectedOld`. There are no FHE operations here because the
+    ///      encrypted raw balance does not need to change, only the public `multiplier`.
+    function setMultiplier(uint256 expectedOld, uint256 newMultiplier, string calldata kind) external onlyAgent {
+        uint256 oldMultiplier = multiplier;
+        require(oldMultiplier == expectedOld, MultiplierMismatch(expectedOld, oldMultiplier));
         require(newMultiplier != 0 && newMultiplier <= type(uint192).max, InvalidCorporateAction());
         multiplier = newMultiplier;
-        emit CorporateAction(kind, numerator, denominator, newMultiplier);
+        emit CorporateAction(kind, oldMultiplier, newMultiplier);
     }
 
     /// @notice Total supply as published to CMC/CG: `rawTotalSupply * multiplier / 1e18` (rounds down).

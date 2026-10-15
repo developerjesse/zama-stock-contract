@@ -36,10 +36,11 @@ version, verified), forge-fhevm `eba2324`. OZ code is not modified.
 - `publishedSupply() = rawTotalSupply * multiplier / 1e18`, rounds down (daily CMC/CG publication).
 
 ### Corporate actions
-- `applyCorporateAction(numerator, denominator, kind)`, agent-only: `multiplier = multiplier * numerator / denominator`.
-  Emits `CorporateAction(kind, numerator, denominator, newMultiplier)`. 2-for-1: (2, 1). $0.50 reinvested on $100: (1005, 1000).
-- Rounding decision: the multiplier rounds DOWN (1e18 precision). Displayed balances round down client-side.
-- Guards (`InvalidCorporateAction`): zero numerator/denominator; new multiplier of 0; new multiplier above `uint192.max`
+- `setMultiplier(expectedOld, newMultiplier, kind)`, agent-only: sets an absolute multiplier computed off-chain (as xStocks does).
+  Reverts `MultiplierMismatch` if the current multiplier is not `expectedOld`. Emits `CorporateAction(kind, oldMultiplier, newMultiplier)`.
+  2-for-1: 2e18. $0.50 reinvested on $100: 1.005e18.
+- Corrections: reissue from the same old value, i.e. `setMultiplier(wrongValue, rightValue, ...)`. Nothing compounds on-chain, so rounding does not build up.
+- Guards (`InvalidCorporateAction`): new multiplier of 0; new multiplier above `uint192.max`
   (keeps `rawTotalSupply * multiplier` inside uint256 so `publishedSupply()` cannot overflow).
 - One multiplier means one uniform rate for all holders (no per-holder withholding). Noted in NatSpec.
 
