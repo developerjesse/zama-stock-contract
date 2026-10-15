@@ -4,6 +4,10 @@ out/
 
 # Dependencies
 dependencies/
+node_modules/
+
+# Forge broadcast logs
+broadcast/
 
 # Env
 .env
@@ -15,3 +19,6 @@ docs/book/
 
 # Misc
 .DS_Store
+
+# Demo holder keys (testnet only)
+demo/.state.json

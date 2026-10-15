@@ -268,6 +268,7 @@ contract ConfidentialStockTest is FhevmTest {
         assertEq(_displayed(_balanceOf(alice, alice.addr)), 1_507_500); // 1.5075 shares
     }
 
+    /// @JESSE - YO!
     function test_resolutionCoarsensAfterSplit() public {
         _mintToTreasury();
         _transferFromTreasury(alice.addr, 1_000_000); // 1.0 share
