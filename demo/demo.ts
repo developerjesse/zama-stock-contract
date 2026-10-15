@@ -48,7 +48,7 @@ const RPC_URL = env("RPC_URL");
 const STOCK = env("STOCK_ADDRESS") as Address;
 
 const ABI = parseAbi([
-  "function mint(uint64 rawAmount)",
+  "function mintShares(uint256 shares)",
   "function setMultiplier(uint256 expectedOld, uint256 newMultiplier, string kind)",
   "function disclose(address holder, address regulator)",
   "function multiplier() view returns (uint256)",
@@ -207,8 +207,8 @@ async function main() {
       const before = await readState();
       await send(
         admin,
-        `mint(${shares(MINT_RAW)} shares)`,
-        admin.walletClient.writeContract({ address: STOCK, abi: ABI, functionName: "mint", args: [MINT_RAW] }),
+        `mintShares(${shares(MINT_RAW)} shares)`,
+        admin.walletClient.writeContract({ address: STOCK, abi: ABI, functionName: "mintShares", args: [MINT_RAW] }),
       );
       const after = await readState();
       printState(after);

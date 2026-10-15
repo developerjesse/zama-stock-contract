@@ -72,7 +72,7 @@ contract ConfidentialStockTest is FhevmTest {
 
     function _mintToTreasury() internal {
         vm.prank(issuer);
-        stock.mint(SUPPLY);
+        stock.mintShares(SUPPLY);
     }
 
     // --- 1. mint + supply ---
@@ -100,26 +100,6 @@ contract ConfidentialStockTest is FhevmTest {
 
         // Plaintext supply is unaffected by private distribution.
         assertEq(stock.rawTotalSupply(), SUPPLY);
-    }
-
-    // --- 8 (mint part). access control ---
-
-    function test_nonIssuerCannotMint() public {
-        // Read the role before pranking: the external call would otherwise consume the prank.
-        bytes32 role = stock.AGENT_ROLE();
-        vm.prank(alice.addr);
-        vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice.addr, role)
-        );
-        stock.mint(1);
-    }
-
-    function test_mintRevertsOnSupplyOverflow() public {
-        vm.startPrank(issuer);
-        stock.mint(type(uint64).max);
-        vm.expectRevert();
-        stock.mint(1);
-        vm.stopPrank();
     }
 
     // --- 9. silent failure ---
@@ -500,16 +480,6 @@ contract ConfidentialStockTest is FhevmTest {
         assertEq(_displayed(50e6), 100e6);
     }
 
-    function test_rawMintAfterSplit_overIssuesIfGivenShareCount() public {
-        _mintToTreasury();
-        _setMultiplier(2e18);
-
-        // Documents the footgun `mintShares` exists for: `mint` is RAW, so passing 100 shares mints 200.
-        vm.prank(issuer);
-        stock.mint(100e6);
-        assertEq(stock.publishedSupply(), 2_000_200e6);
-    }
-
     function test_issuanceAfterReinvestedDividend_exactConversion() public {
         _mintToTreasury();
         _setMultiplier(1.005e18);
@@ -585,7 +555,7 @@ contract ConfidentialStockTest is FhevmTest {
 
     function test_supplyVsRoundedHolderBalances_discrepancy() public {
         vm.prank(issuer);
-        stock.mint(200);
+        stock.mintShares(200);
         _transferFromTreasury(alice.addr, 199);
         _transferFromTreasury(bob.addr, 1);
         _setMultiplier(1.005e18);

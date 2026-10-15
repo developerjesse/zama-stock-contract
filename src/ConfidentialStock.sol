@@ -53,16 +53,8 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         _grantRole(AGENT_ROLE, admin);
     }
 
-    /// @notice The initial mint function, after a CorporateAction() is performed, one should use mintShares
-    ///.        below instead. 
-    // @jesse  Does this need to be here? could we combine mint() and mintShares()?
-    function mint(uint64 rawAmount) external onlyAgent {
-        _mintRaw(rawAmount);
-    }
-
-    /// @notice Mint shares exists because after a CorporateAction is performed, you must calculate that
-    ///         modification when minting new shares.
-    /// @dev I had considered leaving this out, but it was an easy lift and is a question that may come up.
+    /// @notice Mints shares to the treasury. Converts to raw units via the current `multiplier`, so it works
+    ///         for initial issuance (multiplier 1e18) and after a corporate action.
     function mintShares(uint256 shares) external onlyAgent {
         (uint256 raw, bool exact) = sharesToRaw(shares);
         require(exact, NotRepresentable(shares, multiplier));
@@ -115,7 +107,7 @@ contract ConfidentialStock is ZamaEthereumConfig, ERC7984Rwa {
         return (uint256(rawTotalSupply) * multiplier) / MULTIPLIER_ONE;
     }
 
-    /// @dev triggers after a mint() or transfer() and passes the amount and addresses involved. 
+    /// @dev triggers after a mintShares() or transfer() and passes the amount and addresses involved. 
     function _update(address from, address to, euint64 amount) internal override returns (euint64 transferred) {
         transferred = super._update(from, to, amount);
         _grantRegistrar(from, to, transferred);

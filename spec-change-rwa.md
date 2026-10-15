@@ -8,8 +8,8 @@ Apply to the existing ConfidentialStock work. Do not restart.
   AccessControl, remove our own AccessControl inheritance to avoid duplicates.
 - Map our existing issuer/minter role onto Rwa's agent role. The issuer is the agent.
 - Check Rwa's mint functions. If they only accept encrypted amounts, keep our
-  plaintext `mint(uint64 rawAmount)` (agent-only, treasury-only) that calls the
-  internal `_mint(treasury, FHE.asEuint64(rawAmount))` and updates `rawTotalSupply`.
+  plaintext `mintShares(uint256 shares)` (agent-only, treasury-only) that calls the
+  internal `_mint(treasury, FHE.asEuint64(raw))` and updates `rawTotalSupply`.
 - Rwa also gives pause, freeze, allow/blocklist, force transfer. Don't build UI or
   tests for all of them. Add ONE test: agent force-transfer works (lawful order / lost keys).
 

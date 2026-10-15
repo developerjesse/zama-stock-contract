@@ -38,7 +38,7 @@ registry, exchange integration, Safe/Fireblocks (possible stretch later).
   CMC/CG supply publication requirement).
 
 ### Issuance (privacy-preserving)
-- `mint(uint64 rawAmount)` — plaintext amount, mints to the issuer **treasury**
+- `mintShares(uint256 shares)` — plaintext amount, mints to the issuer **treasury**
   address only. Primary issuance matches custodian shares, which are public anyway.
 - Distribution to holders is a normal confidential transfer from treasury, so
   individual allocations stay private.

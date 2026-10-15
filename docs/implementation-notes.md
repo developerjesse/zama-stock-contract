@@ -23,7 +23,7 @@ version, verified), forge-fhevm `eba2324`. OZ code is not modified.
 - Only ONE Rwa feature is tested (agent force-transfer). The rest (pause, freeze, blocklist) is inherited and untested by us.
 
 ### Issuance
-- `mint(uint64 rawAmount)`: agent-only, mints to the immutable `treasury` only, via `_mint(treasury, FHE.asEuint64(raw))`.
+- `mintShares(uint256 shares)`: agent-only, converts shares to raw via `multiplier`, mints to the immutable `treasury` only, via `_mint(treasury, FHE.asEuint64(raw))`.
   Updates plaintext `rawTotalSupply` (checked `uint64 +=`, so overflow reverts before the encrypted mint).
 - Distribution is an ordinary confidential transfer from the treasury.
 - **No burn** (descoped).
@@ -73,7 +73,7 @@ nationality on-chain. The customer's need is "regulators on request", so access 
 | Drop `burn` | Out of MVP scope; also removes a supply-desync risk (encrypted burn silently burns 0 if treasury is short). |
 | Build on ERC7984Rwa (spec change) | Gets agent roles, pause/freeze/force-transfer from audited OZ code instead of building them. |
 | Disable Rwa mint/burn | Preserves treasury-only issuance and `rawTotalSupply` correctness. |
-| Keep plaintext `mint(uint64)` | Rwa mint takes encrypted amounts; primary issuance matches custodian shares, which are public anyway. |
+| Keep plaintext `mintShares(uint256)` | Rwa mint takes encrypted amounts; primary issuance matches custodian shares, which are public anyway. |
 | Treasury as constructor immutable | Smallest surface. No setter. |
 | Multiplier rounds down, bounded to `uint192` | Holders never see more than they own; `publishedSupply()` cannot overflow. |
 | Keep raw precision at 6 decimals | Finer raw would desync `decimals()` from raw scale for wallets/custodians and shrink the supply cap. |
@@ -105,8 +105,8 @@ nationality on-chain. The customer's need is "regulators on request", so access 
 - Not done from specs: `ERC7984ObserverAccess` (optional) and the hook-module refactor (stretch; no `ERC7984Hooked` exists in
   the installed OZ v0.4.0).
 
-## Tests (26)
-- Issuance: mint to treasury and supply, distribution to Alice/Bob, non-agent mint reverts, mint overflow reverts,
+## Tests (34)
+- Issuance: mint to treasury and supply, distribution to Alice/Bob,
   over-balance transfer moves 0, Rwa mint/burn disabled.
 - Rwa: agent force-transfer works, non-agent force-transfer reverts, force transfer rejects zero `from`/`to` (both
   overloads; see review P1).
